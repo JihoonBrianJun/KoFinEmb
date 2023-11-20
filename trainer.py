@@ -23,7 +23,7 @@ from torch.distributed.checkpoint.default_planner import DefaultSavePlanner
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DistributedSampler
-from transformers import AutoConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM, Trainer
+from transformers import AutoConfig, AutoTokenizer, AutoModel, AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from argparse import ArgumentParser
 
@@ -38,14 +38,14 @@ class Config:
     enable_fsdp: bool = False
     low_cpu_fsdp: bool = False
     run_validation: bool = True
-    batch_size_training: int = 16
+    batch_size_training: int = 2
     num_epochs: int = 1
     num_workers_dataloader: int = 1
     gamma: float = 0.85
     seed: int = 2
     val_batch_size: int = 1
-    micro_batch_size: int = 16
-    save_model: bool = True
+    micro_batch_size: int = 2
+    save_model: bool = False
     dist_checkpoint_root_folder: str = "model_checkpoints"
     dist_checkpoint_folder: str = "KoFinEmbInitial"
     save_optimizer: bool = False
@@ -143,35 +143,34 @@ class DataCollator(object):
         
         return dict(input_ids=input_ids, 
                     labels=labels,
-                    attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
-                    dataset_type=dataset_type)
+                    attention_mask=input_ids.ne(self.tokenizer.pad_token_id))
 
 
-class PolyglotClassifier(AutoModelForCausalLM):
-    def __init__(self, config):
-        self.model = AutoModelForCausalLM(config)
+# class PolyglotClassifier(AutoModelForCausalLM):
+#     def __init__(self, args):
+#         self.model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
     
-    def forward(self, input_ids, labels=None, attention_mask=None, dataset_type=None):
-        model_outputs = self.model(input_ids,
-                                   attention_mask=attention_mask,
-                                   output_attentions=True,
-                                   output_hidden_states=True)
-        lm_logits = model_outputs[0]   # (BS, Max_Seq_Len, vocab_size)
+#     def forward(self, input_ids, labels=None, attention_mask=None):
+#         model_outputs = self.model(input_ids,
+#                                    attention_mask=attention_mask,
+#                                    output_attentions=True,
+#                                    output_hidden_states=True)
+#         lm_logits = model_outputs[0]   # (BS, Max_Seq_Len, vocab_size)
         
-        loss = None
-        if labels is not None:
-            logits = lm_logits[:,:-1,:].view(-1, lm_logits.size()[-1])   # (BS * (Max_Seq_Len-1), vocab_size)
-            labels = labels[:,1:].view(-1).to(logits.device)   # (BS * (Max_Seq_Len-1))
-            loss_function = CrossEntropyLoss()
-            loss = loss_function(logits, labels)
+#         loss = None
+#         if labels is not None:
+#             logits = lm_logits[:,:-1,:].view(-1, lm_logits.size()[-1])   # (BS * (Max_Seq_Len-1), vocab_size)
+#             labels = labels[:,1:].view(-1).to(logits.device)   # (BS * (Max_Seq_Len-1))
+#             loss_function = CrossEntropyLoss()
+#             loss = loss_function(logits, labels)
         
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=lm_logits,
-            past_key_values=model_outputs.past_key_values,
-            hidden_states=model_outputs.hidden_states,
-            attentions=model_outputs.attentions,
-        )
+#         return CausalLMOutputWithPast(
+#             loss=loss,
+#             logits=lm_logits,
+#             past_key_values=model_outputs.past_key_values,
+#             hidden_states=model_outputs.hidden_states,
+#             attentions=model_outputs.attentions,
+#         )
 
 
 def train(model, train_dataloader, optimizer, lr_scheduler, gradient_accumulation_steps, config, local_rank=None, rank=None):
@@ -190,19 +189,34 @@ def train(model, train_dataloader, optimizer, lr_scheduler, gradient_accumulatio
         total_loss = 0.0
         
         for step, batch in enumerate(tqdm(train_dataloader,colour="blue", desc=f"Training Epoch{epoch}")):
+            new_batch = dict()
             for key in batch.keys():
                 if config.enable_fsdp:
                     batch[key] = batch[key].to(local_rank)
                 else:
-                    batch[key] = batch[key].to('cuda:0')
+                    new_batch[key] = batch[key].to('cuda:0')
+                    print(f"{key} device: {new_batch[key].device}")
                 batch_size = batch["input_ids"].shape[0]
                 
-                outputs = model(**batch)
-                loss = outputs["loss"]
+                # outputs = model(**batch)
+                
+                outputs = model(**new_batch)
+                lm_logits = outputs[0]   # (BS, Max_Seq_Len, vocab_size)
+                loss = None
+                labels = batch["labels"]
+                
+                logits = lm_logits[:,:-1,:].contiguous().view(-1, lm_logits.size()[-1])   # (BS * (Max_Seq_Len-1), vocab_size)
+            
+                labels = labels[:,1:].contiguous().view(-1).to(logits.device)   # (BS * (Max_Seq_Len-1))
+                loss_function = CrossEntropyLoss()
+                loss = loss_function(logits, labels)                
+            
+                # loss = outputs.loss
                 loss = loss / gradient_accumulation_steps
                 total_loss += loss.detach().float()
                 
                 loss.backward()
+                    
                 if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                     optimizer.step()
                     optimizer.zero_grad()
@@ -519,12 +533,15 @@ def main(args):
             raise Exception("latest pytorch nightly build is required to run with low_cpu_fsdp config, "
                             "please install latest nightly.")
         if rank == 0:
-            model = PolyglotClassifier.from_pretrained(args.model_name_or_path)
+            # model = PolyglotClassifier.from_pretrained(args.model_name_or_path)
+            model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
         else:
             with torch.device("meta"):
-                model = PolyglotClassifier(model_config)
+                # model = PolyglotClassifier(model_config)
+                model = AutoModelForCausalLM(model_config)
     else:
-        model = PolyglotClassifier.from_pretrained(args.model_name_or_path)
+        # model = PolyglotClassifier.from_pretrained(args.model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
     
     if config.enable_fsdp:
         model = FSDP(model)
