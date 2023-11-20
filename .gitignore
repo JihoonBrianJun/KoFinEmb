@@ -1,3 +1,2 @@
-output/*
-scores/*
+results/*
 model_checkpoints/*

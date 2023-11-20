@@ -1,4 +1,6 @@
 import os
+import json
+import pandas as pd
 from pathlib import Path
 from pkg_resources import packaging
 from argparse import ArgumentParser
@@ -154,6 +156,7 @@ def main(args):
         model = AutoModelForCausalLM.from_config(model_config)
         model.load_state_dict(torch.load(os.path.join(checkpoint_dir, "model.pt")))
         model = model.to(torch.device("cuda:0"))
+        
         test_results = test(model, config, dataloader, tokenizer, "cuda:0", 1)
 
 if __name__ == "__main__":

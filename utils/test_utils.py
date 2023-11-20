@@ -5,6 +5,8 @@ import torch.distributed as dist
 
 def test(model, config, eval_dataloader, tokenizer, local_rank, world_size):
     results = []
+    correct = 0
+    
     model.eval()
     
     for step, batch in enumerate(tqdm(eval_dataloader,colour="green", desc="Testing Epoch")):
@@ -37,8 +39,20 @@ def test(model, config, eval_dataloader, tokenizer, local_rank, world_size):
                 )                  
 
             result = tokenizer.decode(outputs[0].view(-1))
-            print(result)
-            results.append(result)
+
+            if "[정답]: " in result and "<|endoftext|>" in result:
+                model_answer = result.split("[정답]: ")[-1].split("<|endoftext|>")[0]
+            else:
+                model_answer = None
+
+            gold_answer = batch["gold_answers"][0]
+            if model_answer == gold_answer:
+                correct += 1
+            
+            print(result + f"\nGold Answer: {gold_answer}")
+            results.append(result + f"\nGold Answer: {gold_answer}")
+    
+    print(f"Correct: {correct} out of {step+1}\nCorrect Rate: {correct / (step+1) * 100}%")
     
     if world_size>1:
         gathered_results = [list() for _ in range(world_size)]

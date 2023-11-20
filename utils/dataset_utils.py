@@ -34,13 +34,10 @@ class DatasetGenerator(Dataset):
         df["classify_label"] = df["label"]
         
         input_list = df["title_with_instruction"].tolist()
-        if dataset_type == "train":
-            target_list = df["classify_label"].tolist()
-        else:
-            target_list = None
+        target_list = df["classify_label"].tolist()
 
         print("Tokenizing inputs... This may take some time...")
-        if target_list != None:
+        if dataset_type == "train":
             example_list = [input+target for input, target in zip(input_list, target_list)]
         else:
             example_list = input_list
@@ -55,18 +52,21 @@ class DatasetGenerator(Dataset):
             input_len = input_tokenized["input_ids_lens"][i] 
             labels[i][:input_len] = self.IGNORE_INDEX
         
-        data_dict = dict(input_ids=input_ids, labels=labels)
-        
-        self.input_ids = data_dict["input_ids"]
-        self.labels = data_dict["labels"]
+        self.input_ids = input_ids
+        self.labels = labels
         self.dataset_type = dataset_type
+        if dataset_type == "eval":
+            self.gold_answer = target_list
         print(f"Example dataset..\nInput: {input_list[0]}\ninput_ids: {self.input_ids[0]}\nlabels: {self.labels[0]}")
     
     def __len__(self):
         return len(self.input_ids)
     
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i], dataset_type=self.dataset_type)
+        if self.dataset_type == "train":
+            return dict(input_ids=self.input_ids[i], labels=self.labels[i], dataset_type=self.dataset_type, gold_answer = None)
+        else:
+            return dict(input_ids=self.input_ids[i], labels=self.labels[i], dataset_type=self.dataset_type, gold_answer = self.gold_answer[i])
     
     def tokenize(self, data_list):
         tokenized_list = []
@@ -89,13 +89,19 @@ class DataCollator(object):
         self.tokenizer = tokenizer
     
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels, dataset_type = tuple([instance[key] for instance in instances]
-                                                for key in ("input_ids", "labels", "dataset_type"))
+        input_ids, labels, dataset_type, gold_answers = tuple([instance[key] for instance in instances]
+                                                              for key in ("input_ids", "labels", "dataset_type", "gold_answer"))
         input_ids = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True,
                                                     padding_value=self.tokenizer.pad_token_id)
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True,
                                                  padding_value=self.tokenizer.pad_token_id)
         
-        return dict(input_ids=input_ids, 
-                    labels=labels,
-                    attention_mask=input_ids.ne(self.tokenizer.pad_token_id))
+        if dataset_type == "train":
+            return dict(input_ids=input_ids, 
+                        labels=labels,
+                        attention_mask=input_ids.ne(self.tokenizer.pad_token_id))
+        else:
+            return dict(input_ids=input_ids, 
+                        labels=labels,
+                        attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+                        gold_answers=gold_answers)            
